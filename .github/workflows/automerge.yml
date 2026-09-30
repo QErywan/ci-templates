@@ -48,4 +48,7 @@ jobs:
 
           gh api -X PUT "repos/$REPO/pulls/$PR/merge" \
             -f merge_method=squash -f sha="$SHA" -f commit_title="$title (#$PR)"
-          gh api -X DELETE "repos/$REPO/git/refs/heads/$branch"
+          # 404/422 means the repo's auto-delete setting already removed it
+          if ! out=$(gh api -X DELETE "repos/$REPO/git/refs/heads/$branch" 2>&1); then
+            grep -qE 'HTTP (404|422)' <<<"$out" || { echo "$out" >&2; exit 1; }
+          fi
