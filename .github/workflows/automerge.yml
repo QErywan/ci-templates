@@ -1,0 +1,51 @@
+name: Automerge
+
+on:
+  workflow_call:
+    inputs:
+      hold-label:
+        description: PRs with this label are never merged
+        type: string
+        default: hold
+
+jobs:
+  merge:
+    # fork PRs get a read-only token, so only same-repo PRs are eligible
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Squash-merge and delete branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          HOLD: ${{ inputs.hold-label }}
+        run: |
+          # re-read state: labels or commits may have changed while checks ran
+          info=$(gh api "repos/$REPO/pulls/$PR" --jq \
+            '.state, .draft, any(.labels[]; .name == env.HOLD), .head.sha, .head.ref, .title')
+          { read -r state; read -r draft; read -r held; read -r head; read -r branch
+            IFS= read -r title; } <<<"$info"
+
+          skip() { echo "::notice title=Automerge skipped::$1"; exit 0; }
+          [[ $state == open ]] || skip "PR is $state"
+          [[ $draft == false ]] || skip "PR is a draft"
+          [[ $held == false ]] || skip "PR has the '$HOLD' label"
+          [[ $head == "$SHA" ]] || skip "PR head moved to $head; the newer run decides"
+
+          # GitHub may refuse GITHUB_TOKEN merges that touch workflow files
+          files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename')
+          if grep -q '^\.github/workflows/' <<<"$files"; then
+            skip "PR changes .github/workflows; merge it manually"
+          fi
+
+          gh api -X PUT "repos/$REPO/pulls/$PR/merge" \
+            -f merge_method=squash -f sha="$SHA" -f commit_title="$title (#$PR)"
+          gh api -X DELETE "repos/$REPO/git/refs/heads/$branch"
